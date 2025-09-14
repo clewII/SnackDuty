@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snack Duty Sign-up</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, collection, getDoc, updateDoc, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase initialization variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Ensure Firebase is configured
+        if (!firebaseConfig || Object.keys(firebaseConfig).length === 0) {
+            console.error("Firebase config is not provided.");
+        }
+
+        // Initialize Firebase services
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        let isSetupView = false;
+        let availableDates = [];
+
+        // Simple hardcoded password for setup view
+        const MANAGER_PASSWORD = "snacktime";
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            setLogLevel('debug');
+            if (firebaseConfig.projectId) {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    userId = auth.currentUser.uid;
+                    isAuthReady = true;
+
+                    // Display the user ID
+                    const userIdDisplay = document.getElementById('userIdDisplay');
+                    userIdDisplay.textContent = `Your ID: ${userId}`;
+
+                    // Set up the date display and event listeners
+                    setupListeners();
+                    attachEventListeners();
+                } catch (e) {
+                    console.error("Error initializing Firebase:", e);
+                    document.getElementById('content-area').innerHTML = `<p class="text-red-500 font-medium">Error loading application. Please try again later.</p>`;
+                }
+            } else {
+                console.error("Firebase config is missing projectId.");
+                document.getElementById('content-area').innerHTML = `<p class="text-red-500 font-medium">Firebase is not configured. Cannot load data.</p>`;
+            }
+        });
+        
+        // --- Helper functions for date and UI ---
+        const getDatesInRange = (startDate, endDate) => {
+            const dates = [];
+            let currentDate = new Date(startDate);
+            while (currentDate <= endDate) {
+                dates.push(new Date(currentDate));
+                currentDate.setDate(currentDate.getDate() + 1);
+            }
+            return dates;
+        };
+
+        const formatDate = (date) => {
+            const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+            return date.toLocaleDateString('en-US', options);
+        };
+
+        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        
+        // --- Core Firestore logic and UI rendering ---
+        const setupListeners = () => {
+            if (!isAuthReady) {
+                document.getElementById('date-list').innerHTML = `<p class="text-center text-gray-500 py-8">Initializing...</p>`;
+                return;
+            }
+
+            // Listen for available dates from the private admin collection
+            const adminDocRef = doc(db, `artifacts/${appId}/users/${userId}/app_data/available_dates`);
+            onSnapshot(adminDocRef, (doc) => {
+                if (doc.exists()) {
+                    availableDates = doc.data().dates || [];
+                    console.log("Loaded available dates:", availableDates);
+                } else {
+                    availableDates = [];
+                }
+                // Once available dates are loaded, set up the public listener for sign-ups
+                setupCalendar();
+            }, (error) => {
+                console.error("Error fetching available dates: ", error);
+                document.getElementById('date-list').innerHTML = `<p class="text-red-500 font-medium">Error loading available dates. Please refresh.</p>`;
+            });
+        };
+
+        const setupCalendar = () => {
+            // Listen for real-time changes to the sign-ups
+            const signupsColRef = collection(db, `artifacts/${appId}/public/data/snack_signups`);
+            onSnapshot(signupsColRef, (snapshot) => {
+                const takenDates = {};
+                snapshot.forEach(doc => {
+                    takenDates[doc.data().date] = {
+                        parentId: doc.data().parentId,
+                        playerName: doc.data().playerName
+                    };
+                });
+                renderDates(takenDates);
+            }, (error) => {
+                console.error("Error fetching documents: ", error);
+                document.getElementById('date-list').innerHTML = `<p class="text-red-500 font-medium">Error loading data. Please refresh.</p>`;
+            });
+        };
+
+        const renderDates = (takenDates) => {
+            const dateList = document.getElementById('date-list');
+            dateList.innerHTML = '';
+            
+            if (availableDates.length === 0) {
+                 dateList.innerHTML = `<p class="text-center text-gray-500 col-span-full">No dates are currently available. The organizer needs to set up the schedule.</p>`;
+                 return;
+            }
+
+            availableDates.forEach(dateStr => {
+                const formattedDate = dateStr;
+                const isTaken = takenDates[formattedDate] && takenDates[formattedDate].parentId;
+                const playerName = isTaken ? takenDates[formattedDate].playerName : null;
+                const isMine = isTaken && takenDates[formattedDate].parentId === userId;
+                
+                const card = document.createElement('div');
+                card.className = `p-6 rounded-xl shadow-lg transition-all duration-300 transform hover:scale-[1.01] flex flex-col items-center text-center ${isTaken ? 'bg-gray-200 border border-gray-300' : 'bg-white hover:shadow-xl'}`;
+
+                card.innerHTML = `
+                    <p class="text-lg font-bold text-gray-800">${formattedDate}</p>
+                    <div class="mt-4 flex flex-col items-center space-y-2">
+                        ${isTaken ? 
+                            `<span class="text-sm font-medium text-gray-600">Taken by: <span class="font-bold text-gray-800">${playerName}</span></span>
+                             ${isMine ?
+                                `<button class="mt-2 text-sm bg-red-500 hover:bg-red-600 text-white font-medium py-2 px-4 rounded-full transition-all duration-200 shadow-md transform hover:scale-105" data-date="${formattedDate}" data-action="cancel">Cancel Sign-up</button>`
+                                :
+                                `<span class="text-xs text-gray-500 mt-1"></span>`
+                             }`
+                             :
+                            `<button class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-full transition-all duration-200 shadow-md transform hover:scale-105" data-date="${formattedDate}" data-action="signup">Sign Up</button>`
+                        }
+                    </div>
+                `;
+                dateList.appendChild(card);
+            });
+        };
+
+        const attachEventListeners = () => {
+            document.addEventListener('click', async (e) => {
+                const target = e.target;
+                const date = target.dataset.date;
+                const action = target.dataset.action;
+
+                if (date && action) {
+                    if (action === 'signup') {
+                        await handleSignUp(date);
+                    } else if (action === 'cancel') {
+                        await handleCancel(date);
+                    }
+                } else if (target.id === 'show-setup') {
+                    toggleView(true);
+                } else if (target.id === 'show-calendar') {
+                    toggleView(false);
+                } else if (target.id === 'save-dates-btn') {
+                    await handleSaveDates();
+                } else if (target.id === 'clear-signups-btn') {
+                    await handleClearSignups();
+                } else if (target.id === 'unlock-btn') {
+                    handleUnlock();
+                }
+            });
+        };
+
+        const toggleView = (showSetup) => {
+            isSetupView = showSetup;
+            const calendarView = document.getElementById('calendar-view');
+            const setupView = document.getElementById('setup-view');
+            const showSetupBtn = document.getElementById('show-setup');
+            const showCalendarBtn = document.getElementById('show-calendar');
+            const playerNameInput = document.getElementById('player-name');
+
+            if (isSetupView) {
+                calendarView.classList.add('hidden');
+                setupView.classList.remove('hidden');
+                showSetupBtn.classList.add('hidden');
+                showCalendarBtn.classList.remove('hidden');
+                playerNameInput.classList.add('hidden');
+            } else {
+                calendarView.classList.remove('hidden');
+                setupView.classList.add('hidden');
+                showSetupBtn.classList.remove('hidden');
+                showCalendarBtn.classList.add('hidden');
+                playerNameInput.classList.remove('hidden');
+            }
+        };
+        
+        const handleUnlock = () => {
+            const passwordInput = document.getElementById('password-input');
+            const password = passwordInput.value.trim();
+
+            if (password === MANAGER_PASSWORD) {
+                document.getElementById('password-section').classList.add('hidden');
+                document.getElementById('setup-options').classList.remove('hidden');
+                showMessage("Setup unlocked!", 'success');
+            } else {
+                showMessage("Incorrect password. Please try again.", 'error');
+            }
+        };
+
+        const handleSaveDates = async () => {
+            const startDate = document.getElementById('start-date').value;
+            const endDate = document.getElementById('end-date').value;
+
+            if (!startDate || !endDate) {
+                showMessage("Please select both a start and end date.", 'error');
+                return;
+            }
+
+            const selectedDays = Array.from(document.querySelectorAll('input[name="day-of-week"]:checked')).map(cb => cb.value);
+            if (selectedDays.length === 0) {
+                showMessage("Please select at least one day of the week.", 'error');
+                return;
+            }
+
+            const fullDateRange = getDatesInRange(new Date(startDate), new Date(endDate));
+            const filteredDates = fullDateRange.filter(date => {
+                const dayOfWeek = dayNames[date.getDay()];
+                return selectedDays.includes(dayOfWeek);
+            }).map(date => formatDate(date));
+            
+            if (!isAuthReady || !userId) {
+                console.warn("Authentication not ready. Please wait.");
+                return;
+            }
+            try {
+                const adminDocRef = doc(db, `artifacts/${appId}/users/${userId}/app_data/available_dates`);
+                await setDoc(adminDocRef, { dates: filteredDates });
+                showMessage("Dates have been successfully saved!", 'success');
+                toggleView(false);
+            } catch (error) {
+                console.error("Error saving dates:", error);
+                showMessage("Error saving dates. Please try again.", 'error');
+            }
+        };
+
+        const handleClearSignups = async () => {
+            if (!isAuthReady) {
+                console.warn("Authentication not ready. Please wait.");
+                return;
+            }
+            try {
+                const signupsColRef = collection(db, `artifacts/${appId}/public/data/snack_signups`);
+                const querySnapshot = await getDocs(signupsColRef);
+                
+                if (querySnapshot.empty) {
+                    showMessage("There are no sign-ups to clear.", 'success');
+                    return;
+                }
+
+                const deletePromises = [];
+                querySnapshot.forEach(doc => {
+                    deletePromises.push(deleteDoc(doc.ref));
+                });
+
+                await Promise.all(deletePromises);
+                showMessage("All sign-ups have been successfully cleared!", 'success');
+            } catch (error) {
+                console.error("Error clearing sign-ups:", error);
+                showMessage("Error clearing sign-ups. Please try again.", 'error');
+            }
+        };
+
+        const handleSignUp = async (date) => {
+            const playerNameInput = document.getElementById('player-name');
+            const playerName = playerNameInput.value.trim();
+
+            if (!playerName) {
+                showMessage("Please enter the player's name to sign up.", 'error');
+                return;
+            }
+            
+            if (!availableDates.includes(date)) {
+                showMessage("This date is not available for sign-up.", 'error');
+                return;
+            }
+
+            if (!isAuthReady || !userId) {
+                console.warn("Authentication not ready. Please wait.");
+                return;
+            }
+            try {
+                const signupsColRef = collection(db, `artifacts/${appId}/public/data/snack_signups`);
+                // Get a new unique document ID based on the date
+                const docRef = doc(signupsColRef, date.replace(/\s/g, '-'));
+
+                // Use a transaction to ensure atomic operations (no double-booking)
+                await setDoc(docRef, {
+                    date: date,
+                    parentId: userId,
+                    playerName: playerName,
+                    timestamp: new Date()
+                }, { merge: false });
+
+                // Show a success message
+                showMessage(`Successfully signed up for ${date}!`, 'success');
+            } catch (error) {
+                console.error("Error signing up:", error);
+                if (error.code === 'aborted') {
+                    showMessage(`Sorry, someone else just signed up for ${date}. Please choose another day.`, 'error');
+                } else {
+                    showMessage("Error signing up. Please try again.", 'error');
+                }
+            }
+        };
+
+        const handleCancel = async (date) => {
+             if (!isAuthReady || !userId) {
+                console.warn("Authentication not ready. Please wait.");
+                return;
+            }
+            try {
+                const signupsColRef = collection(db, `artifacts/${appId}/public/data/snack_signups`);
+                const docRef = doc(signupsColRef, date.replace(/\s/g, '-'));
+
+                // Get the current document to verify ownership
+                const docSnapshot = await getDoc(docRef);
+                if (docSnapshot.exists() && docSnapshot.data().parentId === userId) {
+                    await updateDoc(docRef, { parentId: null, playerName: null });
+                    showMessage(`Successfully canceled your sign-up for ${date}.`, 'success');
+                } else {
+                    showMessage("You can't cancel a slot that isn't yours.", 'error');
+                }
+            } catch (error) {
+                console.error("Error canceling sign-up:", error);
+                showMessage("Error canceling sign-up. Please try again.", 'error');
+            }
+        };
+
+        // --- Message box UI ---
+        const showMessage = (message, type) => {
+            const messageBox = document.getElementById('message-box');
+            const messageText = document.getElementById('message-text');
+            messageText.textContent = message;
+            messageBox.className = `fixed bottom-5 left-1/2 transform -translate-x-1/2 p-4 rounded-xl shadow-lg z-50 transition-all duration-300 ease-in-out ${type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'} opacity-0 translate-y-10`;
+            
+            // Trigger the animation
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-0', 'translate-y-10');
+                messageBox.classList.add('opacity-100', 'translate-y-0');
+            }, 10);
+
+            // Hide the message after a few seconds
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-100', 'translate-y-0');
+                messageBox.classList.add('opacity-0', 'translate-y-10');
+            }, 3000);
+        };
+    </script>
+</head>
+<body class="bg-gray-100 font-[Inter] min-h-screen p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-gray-900 leading-tight">Snack Duty Sign-up</h1>
+            <p class="mt-2 text-lg text-gray-600">Choose an available day to sign up for snack duty.</p>
+            <div class="mt-4 flex flex-col sm:flex-row justify-center items-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <input type="text" id="player-name" placeholder="Enter player's name" class="w-full sm:w-64 px-4 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 text-center">
+                <button id="show-setup" class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-full transition-all duration-200 shadow-md transform hover:scale-105">Setup Dates</button>
+                <button id="show-calendar" class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-full transition-all duration-200 shadow-md transform hover:scale-105 hidden">Back to Calendar</button>
+                <div id="userIdDisplay" class="text-xs font-mono text-gray-500 bg-gray-200 rounded-full px-3 py-1 inline-block"></div>
+            </div>
+        </header>
+
+        <main id="content-area">
+            <!-- Calendar View -->
+            <div id="calendar-view">
+                <div id="date-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <p class="text-center text-gray-500 col-span-full">Loading available dates...</p>
+                </div>
+            </div>
+
+            <!-- Setup View (initially hidden) -->
+            <div id="setup-view" class="hidden">
+                <div class="bg-white p-8 rounded-xl shadow-lg flex flex-col items-center text-center">
+                    <h2 class="text-2xl font-bold text-gray-900 mb-4">Set up the Calendar</h2>
+                    <p class="text-gray-600 mb-6">Choose a date range and the days of the week to include for snack duty.</p>
+                    
+                    <div id="password-section" class="flex flex-col items-center space-y-4 w-full">
+                        <label for="password-input" class="text-lg font-medium text-gray-700">Enter Manager Password</label>
+                        <input type="password" id="password-input" class="w-full max-w-sm px-4 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 text-center" placeholder="Password">
+                        <button id="unlock-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-full transition-all duration-200 shadow-md transform hover:scale-105">Unlock Setup</button>
+                    </div>
+
+                    <div id="setup-options" class="flex flex-col space-y-4 w-full hidden">
+                        <!-- Date Range Selection -->
+                        <div class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4 w-full justify-center">
+                            <div class="flex flex-col">
+                                <label for="start-date" class="text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                                <input type="date" id="start-date" class="px-4 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200">
+                            </div>
+                            <div class="flex flex-col">
+                                <label for="end-date" class="text-sm font-medium text-gray-700 mb-1">End Date</label>
+                                <input type="date" id="end-date" class="px-4 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200">
+                            </div>
+                        </div>
+
+                        <!-- Day of Week Selection -->
+                        <div class="mt-6">
+                            <h3 class="text-lg font-medium text-gray-700 mb-2">Select Days of the Week:</h3>
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Monday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Monday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Tuesday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Tuesday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Wednesday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Wednesday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Thursday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Thursday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Friday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Friday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Saturday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Saturday</span>
+                                </label>
+                                <label class="flex items-center space-x-2 p-2 bg-gray-100 rounded-lg cursor-pointer hover:bg-gray-200 transition-colors duration-200">
+                                    <input type="checkbox" name="day-of-week" value="Sunday" class="rounded text-blue-600 focus:ring-0">
+                                    <span class="text-gray-800">Sunday</span>
+                                </label>
+                            </div>
+                        </div>
+                    
+                        <button id="save-dates-btn" class="mt-8 bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-8 rounded-full transition-all duration-200 shadow-md transform hover:scale-105">Save Dates</button>
+                        <button id="clear-signups-btn" class="mt-4 bg-gray-400 hover:bg-gray-500 text-white font-medium py-3 px-8 rounded-full transition-all duration-200 shadow-md transform hover:scale-105">Clear All Sign-ups</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Message Box -->
+    <div id="message-box" class="fixed bottom-5 left-1/2 transform -translate-x-1/2 p-4 rounded-xl shadow-lg z-50 transition-all duration-300 opacity-0">
+        <p id="message-text" class="font-medium"></p>
+    </div>
+</body>
+</html>
